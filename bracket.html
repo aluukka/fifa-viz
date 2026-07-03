@@ -17,7 +17,12 @@
       color: #cdd6f4;
     }
     h1 { font-size: 1rem; font-weight: bold; letter-spacing: 0.15em; text-transform: uppercase; color: #888; }
-    #controls { display: flex; gap: 0.5rem; }
+    #controls { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; justify-content: center; }
+    select {
+      background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a;
+      border-radius: 5px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+    }
+    select:focus { outline: none; border-color: #89b4fa; }
     button {
       background: #1e1e2e;
       color: #cdd6f4;
@@ -47,9 +52,12 @@
   </style>
 </head>
 <body>
-  <h1>World Cup 2026</h1>
+  <h1 id="title">World Cup 2026</h1>
   <div id="controls">
-    <button id="btn-predict">🔮 Predict</button>
+    <select id="year-select"></select>
+    <button id="btn-ai">📊 AI Pick</button>
+    <button id="btn-flip">🪙 Flip</button>
+    <button id="btn-predict">🔮 Manual</button>
     <button id="btn-reset">↺ Reset</button>
   </div>
   <svg id="viz"></svg>
@@ -57,34 +65,139 @@
 
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    const DATA_URL = 'https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json'
-
-    const ROUND_CONFIG = [
-      { key:'Round of 32',   name:'R32',   size:16 },
-      { key:'Round of 16',   name:'R16',   size:8  },
-      { key:'Quarter-final', name:'QF',    size:4  },
-      { key:'Semi-final',    name:'SF',    size:2  },
-      { key:'Final',         name:'Final', size:1  },
+    const TOURNAMENTS = [
+      {year:2026,host:'Canada/Mexico/USA'},{year:2022,host:'Qatar'},
+      {year:2018,host:'Russia'},{year:2014,host:'Brazil'},
+      {year:2010,host:'South Africa'},{year:2006,host:'Germany'},
+      {year:2002,host:'Korea/Japan'},{year:1998,host:'France'},
+      {year:1994,host:'USA'},{year:1990,host:'Italy'},
+      {year:1986,host:'Mexico'},{year:1982,host:'Spain'},
+      {year:1978,host:'Argentina'},{year:1974,host:'W. Germany'},
+      {year:1970,host:'Mexico'},{year:1966,host:'England'},
+      {year:1962,host:'Chile'},{year:1958,host:'Sweden'},
+      {year:1954,host:'Switzerland'},{year:1950,host:'Brazil'},
+      {year:1938,host:'France'},{year:1934,host:'Italy'},
+      {year:1930,host:'Uruguay'},
     ]
 
+    let currentYear = 2026
+    const dataUrl = y => `https://raw.githubusercontent.com/openfootball/worldcup.json/master/${y}/worldcup.json`
+
+    // Normalise round names across eras → canonical form
+    function normaliseRound(r) {
+      const l = r.toLowerCase()
+      if (l.includes('round of 32'))                            return {key:r, norm:'Round of 32', short:'R32', size:16}
+      if (l.includes('round of 16'))                            return {key:r, norm:'Round of 16', short:'R16', size:8 }
+      if (l.includes('quarter') && !l.includes('replay') && !l.includes('third')) return {key:r, norm:'Quarter-finals', short:'QF', size:4 }
+      if (l.includes('semi'))                                   return {key:r, norm:'Semi-finals',  short:'SF', size:2 }
+      if (l.trim() === 'final')                                 return {key:r, norm:'Final',        short:'Final', size:1}
+      return null
+    }
+
+    function detectRoundConfig(data) {
+      const seen = {}, order = ['Round of 32','Round of 16','Quarter-finals','Semi-finals','Final']
+      for (const m of data.matches) {
+        const n = normaliseRound(m.round)
+        if (n && !seen[n.norm]) seen[n.norm] = n
+      }
+      return order.filter(k=>seen[k]).map(k=>({
+        key: seen[k].key,   // original key for lookup
+        norm: k,
+        short: seen[k].short,
+        size: seen[k].size,
+      }))
+    }
+
+    // Dynamic radii: evenly spaced, teams always at TEAM_R
+    const TEAM_R = 440
+    function buildRadii(numRounds) {
+      return Array.from({length: numRounds+1}, (_,i) => Math.round(TEAM_R * i / numRounds))
+    }
+
+    let ROUND_CONFIG = []
+    let RADII = []
+
     const ISO = {
+      // Current teams
       "Algeria":"dz","Argentina":"ar","Australia":"au","Austria":"at",
-      "Belgium":"be","Bosnia & Herzegovina":"ba","Brazil":"br",
-      "Canada":"ca","Cape Verde":"cv","Colombia":"co",
-      "Croatia":"hr","DR Congo":"cd","Ecuador":"ec",
-      "Egypt":"eg","England":"gb-eng","France":"fr",
-      "Germany":"de","Ghana":"gh","Ivory Coast":"ci",
-      "Japan":"jp","Mexico":"mx","Morocco":"ma",
-      "Netherlands":"nl","Norway":"no","Paraguay":"py",
-      "Portugal":"pt","Senegal":"sn","South Africa":"za",
-      "Spain":"es","Sweden":"se","Switzerland":"ch","USA":"us",
+      "Belgium":"be","Bolivia":"bo","Brazil":"br",
+      "Canada":"ca","Cape Verde":"cv","Chile":"cl","China":"cn","Colombia":"co",
+      "Costa Rica":"cr","Croatia":"hr","Cuba":"cu",
+      "Czech Republic":"cz","Denmark":"dk","DR Congo":"cd",
+      "Ecuador":"ec","Egypt":"eg","El Salvador":"sv","England":"gb-eng",
+      "France":"fr","Germany":"de","Ghana":"gh","Greece":"gr",
+      "Haiti":"ht","Honduras":"hn","Hungary":"hu",
+      "Iceland":"is","Iran":"ir","Iraq":"iq","Ireland":"ie","Israel":"il",
+      "Italy":"it","Jamaica":"jm","Japan":"jp","Kuwait":"kw",
+      "Mexico":"mx","Morocco":"ma","Netherlands":"nl","New Zealand":"nz",
+      "Nigeria":"ng","North Korea":"kp","Northern Ireland":"gb-nir",
+      "Norway":"no","Panama":"pa","Paraguay":"py","Peru":"pe",
+      "Poland":"pl","Portugal":"pt","Qatar":"qa","Romania":"ro",
+      "Russia":"ru","Saudi Arabia":"sa","Scotland":"gb-sct",
+      "Senegal":"sn","Serbia":"rs","Slovakia":"sk","Slovenia":"si",
+      "South Africa":"za","South Korea":"kr","Spain":"es","Sweden":"se",
+      "Switzerland":"ch","Togo":"tg","Trinidad and Tobago":"tt",
+      "Tunisia":"tn","Turkey":"tr","Ukraine":"ua",
+      "United Arab Emirates":"ae","Uruguay":"uy","USA":"us",
+      "United States":"us","Wales":"gb-wls","Ivory Coast":"ci",
+      // Historical / alternate names
+      "Côte d'Ivoire":"ci","Bosnia-Herzegovina":"ba","Bosnia & Herzegovina":"ba",
+      "Czechoslovakia":"cz","West Germany":"de","East Germany":"de",
+      "Soviet Union":"ru","Yugoslavia":"rs","Serbia and Montenegro":"rs",
+      "Zaire":"cd","Dutch East Indies":"id","Türkiye":"tr","DR Congo":"cd",
+    }
+
+    // ── Team strength ratings (1-100) ─────────────────────────────────────────
+    const STRENGTH = {
+      'Argentina':95,'France':91,'Brazil':88,'Spain':86,'England':84,
+      'Germany':83,'Portugal':82,'Netherlands':79,'Belgium':76,
+      'Morocco':73,'Croatia':73,'Uruguay':73,'Switzerland':70,
+      'Colombia':71,'USA':70,'Japan':69,'Mexico':67,'Norway':67,
+      'Sweden':67,'South Korea':66,'Poland':66,'Denmark':65,
+      'Canada':65,'Serbia':65,'Austria':65,'Paraguay':62,
+      'Australia':62,'Ecuador':62,'Algeria':59,'Ivory Coast':61,
+      'Senegal':60,'Ghana':58,'Egypt':57,'Romania':57,'Chile':63,
+      'South Africa':53,'Bosnia & Herzegovina':54,'DR Congo':52,
+      'Saudi Arabia':52,'Cape Verde':47,'Thailand':35,'Tunisia':54,
+    }
+
+    function teamStrength(name) { return STRENGTH[name] ?? 55 }
+
+    function predictMatch(home, away, randomness) {
+      const sh = teamStrength(home), sa = teamStrength(away)
+      const skillProb = sh / (sh + sa)
+      const p = skillProb * (1 - randomness) + 0.5 * randomness
+      return Math.random() < p ? home : away
+    }
+
+    function runPredictions(baseAligned, randomness) {
+      const newPreds = {}
+      // Deep copy to work with
+      const rounds = baseAligned.map(r=>({...r, matches:r.matches.map(m=>({...m}))}))
+
+      for (let ri = 0; ri < rounds.length; ri++) {
+        rounds[ri].matches.forEach((m, mi) => {
+          if (m.winner) return          // real result — skip
+          const h = m.home, a = m.away
+          if (!h || !a) return          // both teams not yet known
+
+          const winner = predictMatch(h, a, randomness)
+          newPreds[`${ri}-${mi}`] = winner
+          m.winner = winner
+
+          // Propagate to next round so subsequent matches can be predicted
+          if (ri + 1 < rounds.length) {
+            const ni = Math.floor(mi/2), isHome = mi%2===0
+            const next = rounds[ri+1].matches[ni]
+            if (next && !next[isHome?'home':'away']) next[isHome?'home':'away'] = winner
+          }
+        })
+      }
+      return newPreds
     }
 
     const W = 980, H = 980, cx = W/2, cy = H/2
     const BADGE_R = 28
-    const TEAM_R  = 440
-    // Radii per depth: 0=trophy, 1=SF, 2=QF, 3=R16, 4=R32, 5=teams
-    const RADII = [0, 82, 160, 238, 318, TEAM_R]
 
     // ── State ──────────────────────────────────────────────────────────────────
     let predictionMode  = false
@@ -411,27 +524,54 @@
           .on('click', onClick||null)
       })
 
-      // ── Trophy ──
-      const tR   = 42
-      const tUrl = 'https://dscdn.daily-sun.com/english/uploads/news_photos/2025/12/18/world-cup_1920x1079-6943f968b91cd.jpg'
-      // Image is 1920x1079 with white space — scale up and crop to trophy
-      // Trophy: no circle, crop to just the trophy area
-      // Image 1920x1079, trophy roughly in center — show 30% width, 90% height of center
-      const tW = 80, tH = 96
-      const tScaleX = 1920 / tW, tScaleY = 1079 / tH
-      // Use SVG viewBox trick via foreignObject is complex; use image with large display + clip rect
-      defs.append('clipPath').attr('id','trophy-clip')
-        .append('rect').attr('x',-tW/2).attr('y',-tH/2).attr('width',tW).attr('height',tH)
-      // Scale image so trophy area fills tW x tH: show central ~30% width, 100% height
-      const dispW = tW * (1920 / (1920*0.28))   // zoom to show 28% of width
-      const dispH = dispW * (1079/1920)
-      g.append('image')
-        .attr('href', tUrl)
-        .attr('x', -dispW/2).attr('y', -dispH/2)
-        .attr('width', dispW).attr('height', dispH)
-        .attr('clip-path','url(#trophy-clip)')
-        .attr('preserveAspectRatio','xMidYMid slice')
-        .attr('pointer-events','none')
+      // ── Centre: winner flag or trophy ────────────────────────────────────────
+      const finalMatch = rounds[rounds.length-1]?.matches[0]
+      const champion   = finalMatch?.winner
+
+      if (champion) {
+        const cr = BADGE_R * 1.4  // slightly larger at centre
+        const url = flagUrl(champion)
+        defs.append('clipPath').attr('id','centre-clip')
+          .append('circle').attr('r', cr)
+        if (url) {
+          g.append('image').attr('href', url)
+            .attr('x',-cr).attr('y',-cr).attr('width',cr*2).attr('height',cr*2)
+            .attr('clip-path','url(#centre-clip)')
+            .attr('preserveAspectRatio','xMidYMid slice')
+            .attr('pointer-events','none')
+        }
+        g.append('circle').attr('r', cr)
+          .attr('fill','transparent')
+          .attr('stroke', finalMatch.isPredicted ? '#c8a830' : '#f0c040')
+          .attr('stroke-width', 3)
+          .on('mouseover', e => showTip(e, { type:'match', match:finalMatch }))
+          .on('mousemove',  e => showTip(e, { type:'match', match:finalMatch }))
+          .on('mouseleave', hideTip)
+        // Champion name + score below
+        const hs = finalMatch.homeScore ?? '–', as = finalMatch.awayScore ?? '–'
+        const ex = finalMatch.extra ? ` (${finalMatch.extra})` : ''
+        const loser = champion === finalMatch.home ? finalMatch.away : finalMatch.home
+        g.append('text').attr('y', cr+14)
+          .attr('text-anchor','middle').attr('font-size','11px').attr('font-weight','bold')
+          .attr('fill','#f0c040').attr('pointer-events','none')
+          .text('🏆 ' + champion)
+        g.append('text').attr('y', cr+27)
+          .attr('text-anchor','middle').attr('font-size','10px')
+          .attr('fill','#888').attr('pointer-events','none')
+          .text(`${hs}–${as} vs ${loser}${ex}`)
+      } else {
+        const tUrl = 'https://dscdn.daily-sun.com/english/uploads/news_photos/2025/12/18/world-cup_1920x1079-6943f968b91cd.jpg'
+        const tW = 80, tH = 96
+        defs.append('clipPath').attr('id','trophy-clip')
+          .append('rect').attr('x',-tW/2).attr('y',-tH/2).attr('width',tW).attr('height',tH)
+        const dispW = tW * (1920/(1920*0.28)), dispH = dispW*(1079/1920)
+        g.append('image').attr('href',tUrl)
+          .attr('x',-dispW/2).attr('y',-dispH/2)
+          .attr('width',dispW).attr('height',dispH)
+          .attr('clip-path','url(#trophy-clip)')
+          .attr('preserveAspectRatio','xMidYMid slice')
+          .attr('pointer-events','none')
+      }
     }
 
     function redraw(){
@@ -439,6 +579,16 @@
       draw(applyPredictions(baseAligned,userPredictions))
     }
 
+    document.getElementById('btn-ai').addEventListener('click',()=>{
+      if(!baseAligned)return
+      userPredictions = runPredictions(baseAligned, 0.35)
+      redraw()
+    })
+    document.getElementById('btn-flip').addEventListener('click',()=>{
+      if(!baseAligned)return
+      userPredictions = runPredictions(baseAligned, 0.95)
+      redraw()
+    })
     document.getElementById('btn-predict').addEventListener('click',()=>{
       predictionMode=!predictionMode
       document.getElementById('btn-predict').classList.toggle('active',predictionMode)
@@ -449,15 +599,40 @@
       userPredictions={}; redraw()
     })
 
-    async function init(){
-      try{
-        const res=await fetch(DATA_URL)
-        const json=await res.json()
-        baseAligned=propagateWinners(alignBracket(parseRounds(json)))
+    // ── Year selector ─────────────────────────────────────────────────────────
+    const sel = document.getElementById('year-select')
+    TOURNAMENTS.forEach(t => {
+      const o = document.createElement('option')
+      o.value = t.year
+      o.textContent = `${t.year} — ${t.host}`
+      if (t.year === 2026) o.selected = true
+      sel.appendChild(o)
+    })
+
+    async function loadYear(year) {
+      try {
+        document.getElementById('title').textContent = `World Cup ${year}`
+        const res  = await fetch(dataUrl(year))
+        const json = await res.json()
+        ROUND_CONFIG = detectRoundConfig(json)
+        RADII        = buildRadii(ROUND_CONFIG.length)
+        userPredictions = {}
+        predictionMode  = false
+        document.getElementById('btn-predict').classList.remove('active')
+        svg.classed('predict-mode', false)
+        if (ROUND_CONFIG.length === 0) {
+          g.selectAll('*').remove()
+          g.append('text').attr('fill','#666').attr('text-anchor','middle')
+            .attr('font-size','14px').text('No knockout bracket data for this year')
+          return
+        }
+        baseAligned = propagateWinners(alignBracket(parseRounds(json)))
         redraw()
-      }catch(e){console.error(e)}
+      } catch(e) { console.error(e) }
     }
-    init()
+
+    sel.addEventListener('change', e => loadYear(Number(e.target.value)))
+    loadYear(2026)
   </script>
 </body>
 </html>
