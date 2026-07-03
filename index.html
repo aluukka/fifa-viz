@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FIFA 2026 Knockout</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #11111b;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', sans-serif;
+      color: #cdd6f4;
+      gap: 1rem;
+    }
+    h1 {
+      font-size: 1.3rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #bac2de;
+    }
+    #controls {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+    }
+    button {
+      background: #313244;
+      color: #cdd6f4;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: #45475a; }
+    button.active { background: #89b4fa33; border-color: #89b4fa; color: #89b4fa; }
+    #bronze {
+      background: #1e1e2e;
+      border: 1px solid #cd7f3288;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 13px;
+      color: #fab387;
+      text-align: center;
+      min-width: 260px;
+    }
+    #bronze .bronze-title { font-size: 11px; color: #cd7f32; letter-spacing: 0.1em; margin-bottom: 4px; }
+    #bronze .bronze-teams { font-size: 15px; font-weight: bold; }
+    #bronze .bronze-score { color: #cdd6f4; font-size: 13px; margin-top: 2px; }
+    #viz { overflow: visible; }
+    #viz.predict-mode .clickable { cursor: crosshair; }
+    #viz.predict-mode .clickable:hover { opacity: 0.85; }
+    #tooltip {
+      position: fixed;
+      background: #1e1e2e;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+      max-width: 220px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <h1>FIFA World Cup 2026 — Knockout Stage</h1>
+  <div id="controls">
+    <button id="btn-predict">🔮 Predict</button>
+    <button id="btn-reset">↺ Reset predictions</button>
+  </div>
+  <svg id="viz"></svg>
+  <div id="bronze"></div>
+  <div id="tooltip"></div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    // ── Constants ─────────────────────────────────────────────────────────────
+    const DATA_URL = 'https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json'
+
+    const ROUND_CONFIG = [
+      { key: 'Round of 32',   name: 'Round of 32',    short: 'R32',   size: 16 },
+      { key: 'Round of 16',   name: 'Round of 16',    short: 'R16',   size: 8  },
+      { key: 'Quarter-final', name: 'Quarter-finals', short: 'QF',    size: 4  },
+      { key: 'Semi-final',    name: 'Semi-finals',    short: 'SF',    size: 2  },
+      { key: 'Final',         name: 'Final',          short: '⚽',    size: 1  },
+    ]
+
+    // flagcdn.com ISO codes
+    const ISO = {
+      "Algeria":"dz","Argentina":"ar","Australia":"au","Austria":"at",
+      "Belgium":"be","Bosnia & Herzegovina":"ba","Brazil":"br",
+      "Canada":"ca","Cape Verde":"cv","Colombia":"co",
+      "Croatia":"hr","DR Congo":"cd","Ecuador":"ec",
+      "Egypt":"eg","England":"gb-eng","France":"fr",
+      "Germany":"de","Ghana":"gh","Ivory Coast":"ci",
+      "Japan":"jp","Mexico":"mx","Morocco":"ma",
+      "Netherlands":"nl","Norway":"no","Paraguay":"py",
+      "Portugal":"pt","Senegal":"sn","South Africa":"za",
+      "Spain":"es","Sweden":"se","Switzerland":"ch","USA":"us",
+    }
+
+    const ROUND_COLORS = ["#89b4fa","#94e2d5","#cba6f7","#fab387","#f38ba8"]
+    const TBD_COLOR    = "#313244"
+    const LOSER_OP     = 0.2
+    const PREDICT_COLOR = "#f9e2af"
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    let predictionMode  = false
+    let userPredictions = {}   // key: "roundIdx-matchIdx" → team name
+    let baseAligned     = null // aligned rounds from live data (never mutated)
+
+    // ── Parse ─────────────────────────────────────────────────────────────────
+    function parseRounds(data) {
+      const byRound = {}
+      for (const m of data.matches) {
+        if (!byRound[m.round]) byRound[m.round] = []
+        byRound[m.round].push(m)
+      }
+      const clean = t => (t && /^W\d+$/.test(t)) ? null : t
+      const empty = () => ({ home:null, away:null, homeScore:null, awayScore:null,
+                             pkHome:null, pkAway:null, winner:null, extra:null, isPredicted:false })
+
+      return ROUND_CONFIG.map(cfg => {
+        const raw = byRound[cfg.key] || []
+        const matches = raw.map(m => {
+          const s = m.score || {}, ft = s.ft||[null,null], et = s.et, pk = s.p
+          let winner = null, extra = null
+          if (ft[0] !== null) {
+            if (pk)      { extra='PK'; winner = pk[0]>pk[1] ? m.team1 : m.team2 }
+            else if (et) { extra='ET'; winner = et[0]>et[1] ? m.team1 : m.team2 }
+            else if (ft[0]!==ft[1]) { winner = ft[0]>ft[1] ? m.team1 : m.team2 }
+          }
+          return {
+            home: clean(m.team1), away: clean(m.team2),
+            homeScore: ft[0], awayScore: ft[1],
+            pkHome: pk ? pk[0] : null, pkAway: pk ? pk[1] : null,
+            winner, extra, isPredicted: false,
+          }
+        })
+        while (matches.length < cfg.size) matches.push(empty())
+        return { name: cfg.name, short: cfg.short, matches }
+      })
+    }
+
+    // ── Bracket alignment ─────────────────────────────────────────────────────
+    const EMPTY_MATCH = { home:null, away:null, homeScore:null, awayScore:null,
+                          pkHome:null, pkAway:null, winner:null, extra:null, isPredicted:false }
+
+    function alignBracket(rounds) {
+      for (let innerIdx = 1; innerIdx < rounds.length; innerIdx++) {
+        const outer = rounds[innerIdx-1], inner = rounds[innerIdx]
+        const teamToMatch = {}
+        outer.matches.forEach((m,i) => {
+          if (m.home) teamToMatch[m.home] = i
+          if (m.away) teamToMatch[m.away] = i
+        })
+
+        const used = new Set()
+        const assignments = inner.matches.map(() => [])
+
+        // Pass 1: assign outer matches for KNOWN inner teams first
+        inner.matches.forEach((mInner, mi) => {
+          for (const team of [mInner.home, mInner.away]) {
+            if (!team) continue
+            const idx = teamToMatch[team]
+            if (idx !== undefined && !used.has(idx)) {
+              assignments[mi].push(outer.matches[idx])
+              used.add(idx)
+            }
+          }
+        })
+
+        // Pass 2: fill TBD slots with remaining outer matches
+        inner.matches.forEach((_, mi) => {
+          while (assignments[mi].length < 2) {
+            const rem = outer.matches.findIndex((_,i) => !used.has(i))
+            if (rem === -1) { assignments[mi].push({ ...EMPTY_MATCH }); break }
+            assignments[mi].push(outer.matches[rem])
+            used.add(rem)
+          }
+        })
+
+        const newOrder = []
+        assignments.forEach(pair => newOrder.push(...pair))
+        outer.matches.forEach((m,i) => { if (!used.has(i)) newOrder.push(m) })
+        outer.matches = newOrder
+      }
+      return rounds
+    }
+
+    // ── Apply predictions ─────────────────────────────────────────────────────
+    function applyPredictions(alignedRounds, predictions) {
+      // Deep copy
+      const rounds = alignedRounds.map(r => ({
+        ...r, matches: r.matches.map(m => ({ ...m }))
+      }))
+
+      // Apply each prediction and propagate upward
+      for (const [key, winner] of Object.entries(predictions)) {
+        const [ri, mi] = key.split('-').map(Number)
+        const match = rounds[ri]?.matches[mi]
+        if (!match || match.winner) continue  // already has real result
+
+        match.winner      = winner
+        match.isPredicted = true
+
+        // Propagate into next round
+        if (ri + 1 < rounds.length) {
+          const nextMatchIdx = Math.floor(mi / 2)
+          const isHome       = (mi % 2 === 0)
+          const next         = rounds[ri+1].matches[nextMatchIdx]
+          if (next && !next[isHome ? 'home' : 'away']) {
+            next[isHome ? 'home' : 'away'] = winner
+          }
+        }
+      }
+      return rounds
+    }
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    const W = 1280, H = 1280, cx = W/2, cy = H/2
+    const innerR = 62, ringWidth = 104, gap = 8, segGap = 0.018
+
+    const svg     = d3.select("#viz").attr("width",W).attr("height",H).attr("viewBox",`0 0 ${W} ${H}`)
+    const g       = svg.append("g").attr("transform",`translate(${cx},${cy})`)
+    const tooltip = d3.select("#tooltip")
+
+    function flagUrl(team) {
+      const iso = ISO[team]
+      return iso ? `https://flagcdn.com/w40/${iso}.png` : null
+    }
+
+    function showTip(event, d) {
+      const m   = d.match
+      let html  = `<span style="color:#585b70;font-size:11px">${d.roundName}</span><br/>`
+      html     += `<strong>${d.team}</strong>`
+      if (m) {
+        if (m.homeScore !== null) {
+          const hs = m.homeScore, as = m.awayScore
+          const ex = m.extra ? ` <span style="color:#94e2d5">(${m.extra})</span>` : ''
+          const pk = (m.pkHome !== null) ? ` [${m.pkHome}–${m.pkAway} pens]` : ''
+          html += `<br/>${m.home??"TBD"} ${hs}–${as} ${m.away??"TBD"}${ex}${pk}`
+        } else {
+          html += `<br/>${m.home??"TBD"} vs ${m.away??"TBD"}`
+        }
+        if (m.winner) {
+          const tag = m.isPredicted ? '🔮' : '✓'
+          html += `<br/>${tag} ${m.winner}`
+        }
+        if (predictionMode && !m.winner && d.team !== "TBD") {
+          html += `<br/><span style="color:#89b4fa">Click to predict winner</span>`
+        }
+      }
+      tooltip.html(html)
+        .style("left", (event.clientX + 14) + "px")
+        .style("top",  (event.clientY - 10) + "px")
+        .style("opacity", 1)
+    }
+    function hideTip() { tooltip.style("opacity", 0) }
+
+    function drawRings(rounds) {
+      g.selectAll("*").remove()
+
+      const totalR = innerR + rounds.length * (ringWidth + gap)
+      g.append("circle").attr("r", totalR).attr("fill", "#141c14")
+
+      const rev = [...rounds].reverse()
+
+      rev.forEach((round, ri) => {
+        const outerR  = innerR + (ri+1)*(ringWidth+gap) - gap
+        const innerRi = innerR + ri*(ringWidth+gap)
+        const color   = ROUND_COLORS[rounds.length - 1 - ri]
+        const origRoundIdx = rounds.length - 1 - ri
+
+        // Pitch band
+        g.append("path")
+          .attr("d", d3.arc().innerRadius(innerRi).outerRadius(outerR).startAngle(0).endAngle(Math.PI*2)())
+          .attr("fill", ri%2===0 ? "rgba(39,160,80,0.05)" : "rgba(39,160,80,0.11)")
+
+        const teams = []
+        round.matches.forEach((m, mi) => {
+          const snap = { ...m }
+          teams.push({ team: snap.home ?? "TBD", match: snap, roundName: round.name, roundIdx: origRoundIdx, matchIdx: mi })
+          teams.push({ team: snap.away ?? "TBD", match: snap, roundName: round.name, roundIdx: origRoundIdx, matchIdx: mi })
+        })
+
+        const n   = teams.length
+        const apt = (2 * Math.PI) / n
+        const arc = d3.arc().innerRadius(innerRi + gap/2).outerRadius(outerR)
+
+        teams.forEach((d, i) => {
+          const sa  = i * apt + segGap/2 - Math.PI/2
+          const ea  = (i+1) * apt - segGap/2 - Math.PI/2
+          const mid = (sa + ea) / 2
+
+          const isWinner    = d.match.winner === d.team
+          const isLoser     = d.match.winner && d.match.winner !== d.team && d.team !== "TBD"
+          const isTBD       = d.team === "TBD"
+          const isPredicted = d.match.isPredicted && isWinner
+          const isClickable = predictionMode && !d.match.winner && !isTBD
+          const segColor    = isPredicted ? PREDICT_COLOR : color
+
+          // Segment path
+          g.append("path")
+            .attr("class", isClickable ? "segment clickable" : "segment")
+            .attr("d", arc({ startAngle: sa, endAngle: ea }))
+            .attr("fill",         isTBD ? TBD_COLOR+"40" : (isWinner ? segColor+"35" : "transparent"))
+            .attr("stroke",       isTBD ? "#45475a" : segColor)
+            .attr("stroke-width", isWinner ? 2.5 : 1)
+            .attr("stroke-dasharray", isPredicted ? "4,3" : "none")
+            .attr("opacity",      isLoser ? LOSER_OP : 1)
+            .on("mouseover", e => showTip(e, d))
+            .on("mousemove",  e => showTip(e, d))
+            .on("mouseleave", hideTip)
+            .on("click", () => handlePredictionClick(d))
+
+          // Labels
+          if (apt > 0.12) {
+            const lr  = (innerRi + outerR) / 2
+            const lx  = Math.sin(mid) * lr
+            const ly  = -Math.cos(mid) * lr
+            const rot = mid * 180 / Math.PI
+
+            const grp = g.append("g")
+              .attr("transform", `translate(${lx},${ly}) rotate(${rot})`)
+              .attr("opacity",       isLoser ? LOSER_OP : 1)
+              .attr("pointer-events","none")
+
+            const textColor = isTBD ? "#45475a" : isPredicted ? PREDICT_COLOR : segColor
+            const fw        = isWinner ? "bold" : "normal"
+            const fs        = apt > 0.25 ? "9px" : "7px"
+
+            // Score
+            const showScore = d.match.homeScore !== null && !isTBD
+            const myScore   = d.team === d.match.home ? d.match.homeScore : d.match.awayScore
+            const pkScore   = d.team === d.match.home ? d.match.pkHome   : d.match.pkAway
+            const scoreStr  = showScore
+              ? (d.match.extra==="PK" ? `${myScore}(${pkScore})` : `${myScore}`)
+              : (isPredicted ? "🔮" : "")
+
+            // Flag image
+            const flagW = apt > 0.22 ? 18 : 12
+            const flagH = Math.round(flagW * 0.67)
+            const url   = flagUrl(d.team)
+            let yOff    = 0
+
+            if (apt > 0.18 && !isTBD && url) {
+              const imgY = apt > 0.25 ? -flagH/2 - 9 : -flagH/2 - 6
+              grp.append("svg:image")
+                .attr("href", url)
+                .attr("width", flagW).attr("height", flagH)
+                .attr("x", -flagW/2).attr("y", imgY)
+                .attr("preserveAspectRatio", "xMidYMid meet")
+                .attr("clip-path", "inset(0 round 2px)")
+              yOff = flagH/2 + 2
+            }
+
+            if (scoreStr) {
+              grp.append("text")
+                .attr("text-anchor","middle").attr("dominant-baseline","middle")
+                .attr("y", yOff).attr("fill", textColor)
+                .attr("font-size", apt > 0.22 ? "10px" : "8px")
+                .attr("font-weight", "bold")
+                .text(scoreStr)
+              yOff += 11
+            }
+
+            if (apt > 0.2 && !isTBD) {
+              grp.append("text")
+                .attr("text-anchor","middle").attr("dominant-baseline","middle")
+                .attr("y", yOff).attr("fill", textColor)
+                .attr("font-size", fs).attr("font-weight", fw)
+                .attr("letter-spacing","0.03em")
+                .text(d.team)
+            }
+          }
+        })
+
+        // Ring label
+        g.append("text")
+          .attr("text-anchor","middle")
+          .attr("x",0).attr("y",-(outerR+innerRi)/2)
+          .attr("fill",color+"88").attr("font-size","11px")
+          .attr("pointer-events","none")
+          .text(round.short)
+      })
+
+      // Trophy centre
+      g.append("circle")
+        .attr("r", innerR-gap).attr("fill","#181825").attr("stroke","#45475a").attr("stroke-width",1)
+      g.append("text")
+        .attr("text-anchor","middle").attr("dominant-baseline","middle").attr("font-size","22px")
+        .attr("pointer-events","none")
+        .text("🏆")
+    }
+
+    // ── Prediction click ──────────────────────────────────────────────────────
+    function handlePredictionClick(d) {
+      if (!predictionMode) return
+      if (d.match.winner) return
+      if (d.team === "TBD") return
+
+      const key = `${d.roundIdx}-${d.matchIdx}`
+      if (userPredictions[key] === d.team) {
+        delete userPredictions[key]
+      } else {
+        userPredictions[key] = d.team
+      }
+      redraw()
+    }
+
+    function redraw() {
+      if (!baseAligned) return
+      const enriched = applyPredictions(baseAligned, userPredictions)
+      drawRings(enriched)
+    }
+
+    // ── Controls ──────────────────────────────────────────────────────────────
+    document.getElementById("btn-predict").addEventListener("click", () => {
+      predictionMode = !predictionMode
+      document.getElementById("btn-predict").classList.toggle("active", predictionMode)
+      svg.classed("predict-mode", predictionMode)
+      redraw()
+    })
+
+    document.getElementById("btn-reset").addEventListener("click", () => {
+      userPredictions = {}
+      redraw()
+    })
+
+    // ── Bootstrap ─────────────────────────────────────────────────────────────
+    function renderBronze(data) {
+      const m = data.matches.find(m => m.round === 'Match for third place')
+      const el = document.getElementById('bronze')
+      if (!m) { el.style.display = 'none'; return }
+
+      const ft = (m.score?.ft) || [null, null]
+      const scoreStr = ft[0] !== null
+        ? `${m.team1} ${ft[0]}–${ft[1]} ${m.team2}`
+        : `${m.team1} vs ${m.team2}`
+
+      el.innerHTML = `
+        <div class="bronze-title">🥉 Third Place Match</div>
+        <div class="bronze-teams">${scoreStr}</div>
+        ${m.score?.ft ? `<div class="bronze-score">FT</div>` : `<div class="bronze-score">Upcoming</div>`}
+      `
+    }
+
+    async function init() {
+      try {
+        const res  = await fetch(DATA_URL)
+        const json = await res.json()
+        const raw  = parseRounds(json)
+        baseAligned = alignBracket(raw)
+        renderBronze(json)
+        redraw()
+      } catch(e) {
+        console.error("Failed to load data", e)
+      }
+    }
+
+    init()
+  </script>
+</body>
+</html>
