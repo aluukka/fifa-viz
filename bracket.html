@@ -317,14 +317,19 @@
 
         const hover = { over: e=>showTip(e,d.data), move: e=>showTip(e,d.data), out: hideTip }
 
-        if (m?.winner) {
+        if (m?.winner && d.depth < 4) {
+          // Junction badges only for SF, QF, R16 — not R32 (leaves handle that)
           const isPred = m.isPredicted
           drawBadge(x, y, BADGE_R, m.winner, matchScoreStr(m), `w${ji}`,
             isPred?'#c8a830':'#f0c040', isPred?1.5:2, null, hover)
 
+        } else if (d.depth === 4) {
+          // R32 junctions: just a dot
+          g.append('circle').attr('cx',x).attr('cy',y).attr('r',4).attr('fill', m?.winner?'#f0c040':'#555')
+
         } else if (m?.home || m?.away) {
-          const mr  = BADGE_R * 0.62
-          const off = BADGE_R * 0.7
+          // Two full-size circles side by side along the tangential direction
+          const off = BADGE_R * 1.08
           const tx  = -Math.sin(a), ty = Math.cos(a)
           const candidates = [
             { team: m.home??'TBD', ox: -tx*off, oy: -ty*off },
@@ -334,8 +339,8 @@
             const cx2 = x+c.ox, cy2 = y+c.oy
             const isPredThis = userPredictions[`${d.data.ri}-${d.data.mi}`] === c.team
             const onClick = predictionMode && !m.winner ? () => predictTeam(d.data.ri, d.data.mi, c.team) : null
-            drawBadge(cx2, cy2, mr, c.team, null, `c${ji}-${ci}`,
-              isPredThis?'#f0c040':'#666', isPredThis?2:1.2, onClick, hover)
+            drawBadge(cx2, cy2, BADGE_R, c.team, null, `c${ji}-${ci}`,
+              isPredThis?'#f0c040':'#666', isPredThis?2.5:1.5, onClick, hover)
           })
 
         } else {
