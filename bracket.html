@@ -232,22 +232,35 @@
       })
     }
 
+    function alignPass(outer, inner) {
+      const t2m={}
+      outer.matches.forEach((m,i)=>{if(m.home)t2m[m.home]=i;if(m.away)t2m[m.away]=i})
+      const used=new Set(),asgn=inner.matches.map(()=>[])
+      inner.matches.forEach((mi,idx)=>{
+        for(const t of [mi.home,mi.away]){if(!t)continue;const i=t2m[t];if(i!==undefined&&!used.has(i)){asgn[idx].push(outer.matches[i]);used.add(i)}}
+      })
+      inner.matches.forEach((_,idx)=>{
+        while(asgn[idx].length<2){const r=outer.matches.findIndex((_,i)=>!used.has(i));if(r===-1){asgn[idx].push({home:null,away:null,homeScore:null,awayScore:null,pkHome:null,pkAway:null,winner:null,extra:null,isPredicted:false});break}asgn[idx].push(outer.matches[r]);used.add(r)}
+      })
+      const no=[];asgn.forEach(p=>no.push(...p))
+      outer.matches.forEach((m,i)=>{if(!used.has(i))no.push(m)})
+      outer.matches=no
+    }
+
     function alignBracket(rounds){
-      // Stop before Final — buildHierarchy handles SF→Final ordering
-      for(let ii=1;ii<rounds.length-1;ii++){
-        const outer=rounds[ii-1],inner=rounds[ii]
-        const t2m={}
-        outer.matches.forEach((m,i)=>{if(m.home)t2m[m.home]=i;if(m.away)t2m[m.away]=i})
-        const used=new Set(),asgn=inner.matches.map(()=>[])
-        inner.matches.forEach((mi,idx)=>{
-          for(const t of [mi.home,mi.away]){if(!t)continue;const i=t2m[t];if(i!==undefined&&!used.has(i)){asgn[idx].push(outer.matches[i]);used.add(i)}}
-        })
-        inner.matches.forEach((_,idx)=>{
-          while(asgn[idx].length<2){const r=outer.matches.findIndex((_,i)=>!used.has(i));if(r===-1){asgn[idx].push({home:null,away:null,homeScore:null,awayScore:null,pkHome:null,pkAway:null,winner:null,extra:null,isPredicted:false});break}asgn[idx].push(outer.matches[r]);used.add(r)}
-        })
-        const no=[];asgn.forEach(p=>no.push(...p))
-        outer.matches.forEach((m,i)=>{if(!used.has(i))no.push(m)})
-        outer.matches=no
+      const sfIdx = rounds.length - 2
+      // Step 1: correct SF order so Final team1 is in SF[0] (→ LEFT)
+      if (sfIdx >= 1) {
+        const sf = rounds[sfIdx], final = rounds[rounds.length-1]?.matches[0]
+        if (final?.home && sf?.matches[1]) {
+          const m1 = sf.matches[1]
+          if (m1?.winner===final.home||m1?.home===final.home||m1?.away===final.home)
+            [sf.matches[0],sf.matches[1]]=[sf.matches[1],sf.matches[0]]
+        }
+      }
+      // Step 2: align from INNER to OUTER so each pass builds on correct inner order
+      for(let ii=sfIdx;ii>=1;ii--){
+        alignPass(rounds[ii-1], rounds[ii])
       }
       return rounds
     }
@@ -314,24 +327,12 @@
       const sf    = rounds[sfIdx]
       const final = rounds[rounds.length-1]?.matches[0]
 
-      // With custom layout: child[0]=LEFT, child[1]=RIGHT
-      // Put Final team1 (home) on LEFT → it should be child[0]
-      // Default: child[0]=SF[0] (LEFT), child[1]=SF[1] (RIGHT)
-      // Swap if team1 came from SF[1]
-      let [left, right] = [0, 1]
-      if (final?.home) {
-        const m1 = sf.matches[1]
-        const homeInSF1 = m1?.winner === final.home
-                       || m1?.home   === final.home
-                       || m1?.away   === final.home
-        if (homeInSF1) [left, right] = [1, 0]
-      }
-
+      // SF already correctly ordered by alignBracket: SF[0]=LEFT, SF[1]=RIGHT
       return {
         type:'trophy',
         children:[
-          buildNode(rounds, sfIdx, left),
-          buildNode(rounds, sfIdx, right),
+          buildNode(rounds, sfIdx, 0),
+          buildNode(rounds, sfIdx, 1),
         ]
       }
     }
