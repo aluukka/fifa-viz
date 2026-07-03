@@ -143,7 +143,7 @@
       // Historical / alternate names
       "Côte d'Ivoire":"ci","Bosnia-Herzegovina":"ba","Bosnia & Herzegovina":"ba",
       "Czechoslovakia":"cz","West Germany":"de","East Germany":"de",
-      "Soviet Union":"ru","Yugoslavia":"rs","Serbia and Montenegro":"rs",
+      "Soviet Union":null,"Yugoslavia":"rs","Serbia and Montenegro":"rs",
       "Zaire":"cd","Dutch East Indies":"id","Türkiye":"tr","DR Congo":"cd",
     }
 
@@ -215,13 +215,16 @@
       return ROUND_CONFIG.map(cfg=>{
         const matches=(byRound[cfg.key]||[]).map(m=>{
           const s=m.score||{},ft=s.ft||[null,null],et=s.et,pk=s.p
+          // Use ET score for display if available (shows final result not just FT)
+          const displayScore = pk ? ft : (et || ft)
           let winner=null,extra=null
           if(ft[0]!==null){
             if(pk){extra='PK';winner=pk[0]>pk[1]?m.team1:m.team2}
             else if(et){extra='ET';winner=et[0]>et[1]?m.team1:m.team2}
             else if(ft[0]!==ft[1]){winner=ft[0]>ft[1]?m.team1:m.team2}
           }
-          return {home:clean(m.team1),away:clean(m.team2),homeScore:ft[0],awayScore:ft[1],
+          return {home:clean(m.team1),away:clean(m.team2),
+                  homeScore:displayScore[0],awayScore:displayScore[1],
                   pkHome:pk?pk[0]:null,pkAway:pk?pk[1]:null,winner,extra,isPredicted:false}
         })
         while(matches.length<cfg.size)matches.push(empty())
@@ -230,7 +233,8 @@
     }
 
     function alignBracket(rounds){
-      for(let ii=1;ii<rounds.length;ii++){
+      // Stop before Final — buildHierarchy handles SF→Final ordering
+      for(let ii=1;ii<rounds.length-1;ii++){
         const outer=rounds[ii-1],inner=rounds[ii]
         const t2m={}
         outer.matches.forEach((m,i)=>{if(m.home)t2m[m.home]=i;if(m.away)t2m[m.away]=i})
@@ -294,11 +298,40 @@
     }
 
     function buildHierarchy(rounds) {
+      // Final-only (e.g. 1974, 1978): just show two finalists
+      if (rounds.length < 2) {
+        const final = rounds[0]?.matches[0]
+        return {
+          type:'trophy',
+          children:[
+            { type:'team', name:final?.home??'TBD', match:final, ri:0, mi:0 },
+            { type:'team', name:final?.away??'TBD', match:final, ri:0, mi:0 },
+          ]
+        }
+      }
+
+      const sfIdx = rounds.length - 2
+      const sf    = rounds[sfIdx]
+      const final = rounds[rounds.length-1]?.matches[0]
+
+      // With custom layout: child[0]=LEFT, child[1]=RIGHT
+      // Put Final team1 (home) on LEFT → it should be child[0]
+      // Default: child[0]=SF[0] (LEFT), child[1]=SF[1] (RIGHT)
+      // Swap if team1 came from SF[1]
+      let [left, right] = [0, 1]
+      if (final?.home) {
+        const m1 = sf.matches[1]
+        const homeInSF1 = m1?.winner === final.home
+                       || m1?.home   === final.home
+                       || m1?.away   === final.home
+        if (homeInSF1) [left, right] = [1, 0]
+      }
+
       return {
         type:'trophy',
         children:[
-          buildNode(rounds, rounds.length-2, 0),
-          buildNode(rounds, rounds.length-2, 1),
+          buildNode(rounds, sfIdx, left),
+          buildNode(rounds, sfIdx, right),
         ]
       }
     }
@@ -361,8 +394,17 @@
       defs.selectAll('*').remove()
 
       const root = d3.hierarchy(buildHierarchy(rounds))
-      d3.cluster().size([2*Math.PI, 1])(root)
-      root.each(d=>{ d.y = RADII[Math.min(d.depth, RADII.length-1)] })
+
+      // Custom inside-out layout: child[0]=LEFT half, child[1]=RIGHT half
+      // Use [π,3π] so child[0] maps to visual LEFT, child[1] to visual RIGHT
+      ;(function assign(node, lo, hi, depth) {
+        node.x = (lo + hi) / 2
+        node.y = RADII[Math.min(depth, RADII.length-1)]
+        if (!node.children) return
+        const mid = (lo + hi) / 2
+        assign(node.children[0], lo, mid, depth+1)
+        if (node.children[1]) assign(node.children[1], mid, hi, depth+1)
+      })(root, Math.PI, 3*Math.PI, 0)
 
       // ── Arms (radial + arc) ──
       root.descendants().filter(d=>d.children).forEach(parent=>{
@@ -574,6 +616,108 @@
       }
     }
 
+    function renderGroupTable(g, matches, roundName) {
+      // Compute standings
+      const teams = {}
+      const init = t => { if (!teams[t]) teams[t] = {team:t,p:0,w:0,d:0,l:0,gf:0,ga:0} }
+      for (const m of matches) {
+        const ft = m.score?.ft
+        if (!ft) continue
+        init(m.team1); init(m.team2)
+        const a = teams[m.team1], b = teams[m.team2]
+        a.p++; b.p++; a.gf+=ft[0]; a.ga+=ft[1]; b.gf+=ft[1]; b.ga+=ft[0]
+        if (ft[0]>ft[1])      { a.w++; b.l++ }
+        else if (ft[0]<ft[1]) { b.w++; a.l++ }
+        else                  { a.d++; b.d++ }
+      }
+      const rows = Object.values(teams)
+        .map(t=>({...t, gd:t.gf-t.ga, pts:t.w*3+t.d}))
+        .sort((a,b)=>b.pts-a.pts||b.gd-a.gd||b.gf-a.gf)
+
+      const cols = ['Team','P','W','D','L','GF','GA','GD','Pts']
+      const colW  = [180,40,40,40,40,40,40,50,50]
+      const totalW = colW.reduce((a,b)=>a+b,0)
+      const rowH  = 36, headerH = 38
+      const tableH = headerH + rows.length * rowH
+      const ox = -totalW/2, oy = -tableH/2 - 20
+
+      // Title
+      g.append('text').attr('x',0).attr('y',oy-16)
+        .attr('text-anchor','middle').attr('fill','#bac2de').attr('font-size','13px')
+        .attr('letter-spacing','0.1em').text(roundName.toUpperCase())
+
+      // Header
+      g.append('rect').attr('x',ox).attr('y',oy).attr('width',totalW).attr('height',headerH)
+        .attr('fill','#313244').attr('rx',4)
+
+      let cx2 = ox
+      cols.forEach((col,ci) => {
+        g.append('text')
+          .attr('x', cx2 + colW[ci]/2).attr('y', oy + headerH/2)
+          .attr('text-anchor','middle').attr('dominant-baseline','middle')
+          .attr('fill','#a6adc8').attr('font-size','11px').attr('font-weight','bold')
+          .text(col)
+        cx2 += colW[ci]
+      })
+
+      // Rows
+      rows.forEach((row,ri) => {
+        const ry = oy + headerH + ri * rowH
+        g.append('rect').attr('x',ox).attr('y',ry).attr('width',totalW).attr('height',rowH)
+          .attr('fill', ri%2===0 ? '#1e1e2e' : '#181825').attr('rx',0)
+
+        // Flag
+        const url = flagUrl(row.team)
+        if (url) {
+          const fh = 14, fw = 21
+          g.append('svg:image').attr('href',url)
+            .attr('x', ox+8).attr('y', ry+rowH/2-fh/2)
+            .attr('width',fw).attr('height',fh)
+            .attr('preserveAspectRatio','xMidYMid slice')
+          defs.append('clipPath').attr('id',`tc-${ri}`)
+            .append('rect').attr('x',ox+8).attr('y',ry+rowH/2-fh/2).attr('width',fw).attr('height',fh)
+        }
+
+        const vals = [row.team, row.p, row.w, row.d, row.l, row.gf, row.ga,
+                      (row.gd>=0?'+':'')+row.gd, row.pts]
+        let cx3 = ox
+        vals.forEach((val,ci) => {
+          const isTeam = ci===0
+          const isBold = ci===8  // Pts
+          const fill   = ci===7 ? (row.gd>=0?'#a6e3a1':'#f38ba8') : '#cdd6f4'
+          g.append('text')
+            .attr('x', isTeam ? cx3+36 : cx3+colW[ci]/2)
+            .attr('y', ry + rowH/2)
+            .attr('text-anchor', isTeam ? 'start' : 'middle')
+            .attr('dominant-baseline','middle')
+            .attr('fill', fill).attr('font-size', isTeam?'12px':'12px')
+            .attr('font-weight', isBold?'bold':'normal')
+            .text(val)
+          cx3 += colW[ci]
+        })
+
+        // Bottom border
+        g.append('line').attr('x1',ox).attr('y1',ry+rowH).attr('x2',ox+totalW).attr('y2',ry+rowH)
+          .attr('stroke','#313244').attr('stroke-width',0.5)
+      })
+
+      // Match results below
+      const mx = ox, my = oy + tableH + 24
+      g.append('text').attr('x',0).attr('y',my-4)
+        .attr('text-anchor','middle').attr('fill','#585b70').attr('font-size','11px')
+        .attr('letter-spacing','0.08em').text('RESULTS')
+
+      matches.forEach((m,mi) => {
+        const ft = m.score?.ft
+        const score = ft ? `${ft[0]}–${ft[1]}` : 'vs'
+        const row2 = Math.floor(mi/2), col2 = mi%2
+        const rx2 = ox + col2*(totalW/2), ry2 = my + 10 + row2*22
+        g.append('text').attr('x', rx2 + totalW/4).attr('y', ry2)
+          .attr('text-anchor','middle').attr('fill','#7f849c').attr('font-size','11px')
+          .text(`${m.team1} ${score} ${m.team2}`)
+      })
+    }
+
     function redraw(){
       if(!baseAligned)return
       draw(applyPredictions(baseAligned,userPredictions))
@@ -622,8 +766,19 @@
         svg.classed('predict-mode', false)
         if (ROUND_CONFIG.length === 0) {
           g.selectAll('*').remove()
-          g.append('text').attr('fill','#666').attr('text-anchor','middle')
-            .attr('font-size','14px').text('No knockout bracket data for this year')
+          // Try to render a group stage table if data exists
+          const groupRounds = { 1950: 'Final Round', 1974: 'Second round', 1978: 'Second round' }
+          const groupKey = Object.keys(groupRounds).find(y => Number(y) === year)
+          if (groupKey) {
+            const groupMatches = json.matches.filter(m => m.round === groupRounds[groupKey])
+            if (groupMatches.length > 0) {
+              renderGroupTable(g, groupMatches, groupRounds[groupKey])
+              return
+            }
+          }
+          g.append('text').attr('fill','#cdd6f4').attr('text-anchor','middle')
+            .attr('dominant-baseline','middle').attr('font-size','14px')
+            .text('No bracket data for this year')
           return
         }
         baseAligned = propagateWinners(alignBracket(parseRounds(json)))
