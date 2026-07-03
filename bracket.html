@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FIFA 2026 — Radial Bracket</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #12121e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', sans-serif;
+      gap: 0.6rem;
+      color: #cdd6f4;
+    }
+    h1 { font-size: 1rem; font-weight: bold; letter-spacing: 0.15em; text-transform: uppercase; color: #888; }
+    #controls { display: flex; gap: 0.5rem; }
+    button {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      border: 1px solid #45475a;
+      border-radius: 5px;
+      padding: 5px 14px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { background: #313244; }
+    button.active { background: #89b4fa22; border-color: #89b4fa; color: #89b4fa; }
+    #viz { overflow: visible; }
+    #viz.predict-mode .clickable { cursor: crosshair; }
+    #tooltip {
+      position: fixed;
+      background: #1e1e2e;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      padding: 7px 12px;
+      font-size: 13px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+      color: #cdd6f4;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <h1>World Cup 2026</h1>
+  <div id="controls">
+    <button id="btn-predict">🔮 Predict</button>
+    <button id="btn-reset">↺ Reset</button>
+  </div>
+  <svg id="viz"></svg>
+  <div id="tooltip"></div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    const DATA_URL = 'https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json'
+
+    const ROUND_CONFIG = [
+      { key:'Round of 32',   name:'R32',   size:16 },
+      { key:'Round of 16',   name:'R16',   size:8  },
+      { key:'Quarter-final', name:'QF',    size:4  },
+      { key:'Semi-final',    name:'SF',    size:2  },
+      { key:'Final',         name:'Final', size:1  },
+    ]
+
+    const ISO = {
+      "Algeria":"dz","Argentina":"ar","Australia":"au","Austria":"at",
+      "Belgium":"be","Bosnia & Herzegovina":"ba","Brazil":"br",
+      "Canada":"ca","Cape Verde":"cv","Colombia":"co",
+      "Croatia":"hr","DR Congo":"cd","Ecuador":"ec",
+      "Egypt":"eg","England":"gb-eng","France":"fr",
+      "Germany":"de","Ghana":"gh","Ivory Coast":"ci",
+      "Japan":"jp","Mexico":"mx","Morocco":"ma",
+      "Netherlands":"nl","Norway":"no","Paraguay":"py",
+      "Portugal":"pt","Senegal":"sn","South Africa":"za",
+      "Spain":"es","Sweden":"se","Switzerland":"ch","USA":"us",
+    }
+
+    const W = 980, H = 980, cx = W/2, cy = H/2
+    const BADGE_R = 28
+    const TEAM_R  = 440
+    // Radii per depth: 0=trophy, 1=SF, 2=QF, 3=R16, 4=R32, 5=teams
+    const RADII = [0, 82, 160, 238, 318, TEAM_R]
+
+    // ── State ──────────────────────────────────────────────────────────────────
+    let predictionMode  = false
+    let userPredictions = {}
+    let baseAligned     = null
+
+    const flagUrl = t => { const iso=ISO[t]; return iso?`https://flagcdn.com/w40/${iso}.png`:null }
+
+    // ── Parse / Align / Propagate / Predict ───────────────────────────────────
+    function parseRounds(data) {
+      const byRound={}
+      for (const m of data.matches) { if (!byRound[m.round]) byRound[m.round]=[]; byRound[m.round].push(m) }
+      const clean=t=>(t&&/^W\d+$/.test(t))?null:t
+      const empty=()=>({home:null,away:null,homeScore:null,awayScore:null,pkHome:null,pkAway:null,winner:null,extra:null,isPredicted:false})
+      return ROUND_CONFIG.map(cfg=>{
+        const matches=(byRound[cfg.key]||[]).map(m=>{
+          const s=m.score||{},ft=s.ft||[null,null],et=s.et,pk=s.p
+          let winner=null,extra=null
+          if(ft[0]!==null){
+            if(pk){extra='PK';winner=pk[0]>pk[1]?m.team1:m.team2}
+            else if(et){extra='ET';winner=et[0]>et[1]?m.team1:m.team2}
+            else if(ft[0]!==ft[1]){winner=ft[0]>ft[1]?m.team1:m.team2}
+          }
+          return {home:clean(m.team1),away:clean(m.team2),homeScore:ft[0],awayScore:ft[1],
+                  pkHome:pk?pk[0]:null,pkAway:pk?pk[1]:null,winner,extra,isPredicted:false}
+        })
+        while(matches.length<cfg.size)matches.push(empty())
+        return {name:cfg.name,matches}
+      })
+    }
+
+    function alignBracket(rounds){
+      for(let ii=1;ii<rounds.length;ii++){
+        const outer=rounds[ii-1],inner=rounds[ii]
+        const t2m={}
+        outer.matches.forEach((m,i)=>{if(m.home)t2m[m.home]=i;if(m.away)t2m[m.away]=i})
+        const used=new Set(),asgn=inner.matches.map(()=>[])
+        inner.matches.forEach((mi,idx)=>{
+          for(const t of [mi.home,mi.away]){if(!t)continue;const i=t2m[t];if(i!==undefined&&!used.has(i)){asgn[idx].push(outer.matches[i]);used.add(i)}}
+        })
+        inner.matches.forEach((_,idx)=>{
+          while(asgn[idx].length<2){const r=outer.matches.findIndex((_,i)=>!used.has(i));if(r===-1){asgn[idx].push({home:null,away:null,homeScore:null,awayScore:null,pkHome:null,pkAway:null,winner:null,extra:null,isPredicted:false});break}asgn[idx].push(outer.matches[r]);used.add(r)}
+        })
+        const no=[];asgn.forEach(p=>no.push(...p))
+        outer.matches.forEach((m,i)=>{if(!used.has(i))no.push(m)})
+        outer.matches=no
+      }
+      return rounds
+    }
+
+    function propagateWinners(rounds){
+      for(let oi=0;oi<rounds.length-1;oi++){
+        const outer=rounds[oi],inner=rounds[oi+1]
+        outer.matches.forEach((m,mi)=>{
+          if(!m.winner||m.isPredicted)return
+          const ni=Math.floor(mi/2),isHome=(mi%2===0),next=inner.matches[ni]
+          if(next&&!next[isHome?'home':'away'])next[isHome?'home':'away']=m.winner
+        })
+      }
+      return rounds
+    }
+
+    function applyPredictions(alignedRounds,predictions){
+      const rounds=alignedRounds.map(r=>({...r,matches:r.matches.map(m=>({...m}))}))
+      for(const [key,winner] of Object.entries(predictions)){
+        const [ri,mi]=key.split('-').map(Number)
+        const match=rounds[ri]?.matches[mi]
+        if(!match||match.winner)continue
+        match.winner=winner;match.isPredicted=true
+        if(ri+1<rounds.length){const ni=Math.floor(mi/2),isHome=(mi%2===0),next=rounds[ri+1].matches[ni];if(next&&!next[isHome?'home':'away'])next[isHome?'home':'away']=winner}
+      }
+      return rounds
+    }
+
+    // ── Build hierarchy ────────────────────────────────────────────────────────
+    function buildNode(rounds, ri, mi) {
+      const match = rounds[ri].matches[mi]
+      if (ri === 0) {
+        return {
+          type:'match', match, ri, mi,
+          children:[
+            {type:'team', name:match.home??'TBD', match, ri, mi},
+            {type:'team', name:match.away??'TBD', match, ri, mi},
+          ]
+        }
+      }
+      return {
+        type:'match', match, ri, mi,
+        children:[
+          buildNode(rounds, ri-1, mi*2),
+          buildNode(rounds, ri-1, mi*2+1),
+        ]
+      }
+    }
+
+    function buildHierarchy(rounds) {
+      return {
+        type:'trophy',
+        children:[
+          buildNode(rounds, rounds.length-2, 0),
+          buildNode(rounds, rounds.length-2, 1),
+        ]
+      }
+    }
+
+    // ── L-shaped arm path ──────────────────────────────────────────────────────
+    // From child position: radial line inward to parent radius, then arc to parent angle
+    function armPath(parentNode, childNode) {
+      const pa = parentNode.x - Math.PI/2
+      const ca = childNode.x  - Math.PI/2
+      const pr = parentNode.y
+      const cr = childNode.y
+
+      const tx = Math.cos(ca)*cr, ty = Math.sin(ca)*cr   // child pos
+      const ax = Math.cos(ca)*pr, ay = Math.sin(ca)*pr   // radial endpoint at parent radius
+      const px = Math.cos(pa)*pr, py = Math.sin(pa)*pr   // parent (junction) pos
+
+      // Short arc from (ax,ay) to (px,py) along radius pr
+      let dAngle = pa - ca
+      while (dAngle >  Math.PI) dAngle -= 2*Math.PI
+      while (dAngle < -Math.PI) dAngle += 2*Math.PI
+      const sweep = dAngle > 0 ? 1 : 0
+
+      return `M ${tx},${ty} L ${ax},${ay} A ${pr},${pr} 0 0,${sweep} ${px},${py}`
+    }
+
+    // ── Draw ───────────────────────────────────────────────────────────────────
+    const svg     = d3.select('#viz').attr('width',W).attr('height',H).attr('viewBox',`0 0 ${W} ${H}`)
+    const g       = svg.append('g').attr('transform',`translate(${cx},${cy})`)
+    const defs    = svg.append('defs')
+    const tooltip = d3.select('#tooltip')
+
+    function showTip(event, data) {
+      const m=data.match; if(!m)return
+      let html=data.type==='team'?`<strong>${data.name}</strong><br/>`:``;
+      const hs=m.homeScore??'–',as=m.awayScore??'–',ex=m.extra?` (${m.extra})`:''
+      html+=m.homeScore!==null?`${m.home??'TBD'} ${hs}–${as} ${m.away??'TBD'}${ex}`:`${m.home??'TBD'} vs ${m.away??'TBD'}`
+      if(m.winner)html+=`<br/>${m.isPredicted?'🔮':'✓'} ${m.winner}`
+      if(predictionMode&&!m.winner&&data.type==='team'&&data.name!=='TBD')html+=`<br/><span style="color:#89b4fa">click to predict</span>`
+      tooltip.html(html).style('left',(event.clientX+14)+'px').style('top',(event.clientY-10)+'px').style('opacity',1)
+    }
+    function hideTip(){tooltip.style('opacity',0)}
+
+    function predictTeam(ri, mi, team) {
+      if (!team || team === 'TBD') return
+      const key = `${ri}-${mi}`
+      userPredictions[key] = userPredictions[key] === team ? undefined : team
+      if (!userPredictions[key]) delete userPredictions[key]
+      redraw()
+    }
+
+    function handleClick(data) {
+      if (!predictionMode) return
+      const m = data.match; if (!m || m.winner) return
+      if (data.type === 'team' && data.name !== 'TBD') predictTeam(data.ri, data.mi, data.name)
+      // junction clicks handled per-side below
+    }
+
+    function draw(rounds) {
+      g.selectAll('*').remove()
+      defs.selectAll('*').remove()
+
+      const root = d3.hierarchy(buildHierarchy(rounds))
+      d3.cluster().size([2*Math.PI, 1])(root)
+      root.each(d=>{ d.y = RADII[Math.min(d.depth, RADII.length-1)] })
+
+      // ── Arms (radial + arc) ──
+      root.descendants().filter(d=>d.children).forEach(parent=>{
+        parent.children.forEach(child=>{
+          const m      = child.data.match
+          const isPred = m?.isPredicted
+          g.append('path')
+            .attr('d', armPath(parent, child))
+            .attr('fill','none')
+            .attr('stroke', isPred ? '#c8a830' : '#555')
+            .attr('stroke-width', 1.1)
+            .attr('stroke-dasharray', isPred ? '5,3' : 'none')
+        })
+      })
+
+      // ── All badge circles same size ──
+      function drawBadge(x, y, r, team, scoreStr, clipSuffix, strokeColor, strokeW, onClick, onHover) {
+        const url    = flagUrl(team)
+        const clipId = `jclip-${clipSuffix}`
+        defs.append('clipPath').attr('id', clipId)
+          .append('circle').attr('cx',x).attr('cy',y).attr('r',r)
+
+        if (url && team !== 'TBD') {
+          g.append('image').attr('href',url)
+            .attr('x',x-r).attr('y',y-r).attr('width',r*2).attr('height',r*2)
+            .attr('clip-path',`url(#${clipId})`).attr('preserveAspectRatio','xMidYMid slice')
+            .attr('pointer-events','none')
+        } else {
+          g.append('circle').attr('cx',x).attr('cy',y).attr('r',r)
+            .attr('fill','#2a2a3e').attr('pointer-events','none')
+        }
+
+        // Score overlay bar at bottom of circle
+        if (scoreStr) {
+          const barH = r * 0.42
+          g.append('rect')
+            .attr('x',x-r).attr('y',y+r-barH).attr('width',r*2).attr('height',barH)
+            .attr('fill','rgba(0,0,0,0.62)').attr('clip-path',`url(#${clipId})`)
+            .attr('pointer-events','none')
+          g.append('text')
+            .attr('x',x).attr('y',y+r-barH/2)
+            .attr('text-anchor','middle').attr('dominant-baseline','middle')
+            .attr('fill','#fff').attr('font-size',`${Math.max(r*0.38,8)}px`).attr('font-weight','bold')
+            .attr('clip-path',`url(#${clipId})`).attr('pointer-events','none')
+            .text(scoreStr)
+        }
+
+        const ring = g.append('circle').attr('cx',x).attr('cy',y).attr('r',r)
+          .attr('fill','transparent').attr('stroke',strokeColor).attr('stroke-width',strokeW)
+          .style('cursor', onClick ? 'crosshair' : 'default')
+        if (onClick) ring.on('click', onClick)
+        if (onHover) ring.on('mouseover',onHover.over).on('mousemove',onHover.move).on('mouseleave',onHover.out)
+      }
+
+      function matchScoreStr(m) {
+        if (!m || m.homeScore === null) return null
+        const ex = m.extra === 'PK' ? 'p' : m.extra === 'ET' ? 'e' : ''
+        return `${m.homeScore}-${m.awayScore}${ex}`
+      }
+
+      root.descendants().filter(d=>d.data.type==='match').forEach((d,ji)=>{
+        const a  = d.x - Math.PI/2
+        const x  = Math.cos(a)*d.y, y = Math.sin(a)*d.y
+        const m  = d.data.match
+
+        const hover = { over: e=>showTip(e,d.data), move: e=>showTip(e,d.data), out: hideTip }
+
+        if (m?.winner) {
+          const isPred = m.isPredicted
+          drawBadge(x, y, BADGE_R, m.winner, matchScoreStr(m), `w${ji}`,
+            isPred?'#c8a830':'#f0c040', isPred?1.5:2, null, hover)
+
+        } else if (m?.home || m?.away) {
+          const mr  = BADGE_R * 0.62
+          const off = BADGE_R * 0.7
+          const tx  = -Math.sin(a), ty = Math.cos(a)
+          const candidates = [
+            { team: m.home??'TBD', ox: -tx*off, oy: -ty*off },
+            { team: m.away??'TBD', ox:  tx*off, oy:  ty*off },
+          ]
+          candidates.forEach((c, ci) => {
+            const cx2 = x+c.ox, cy2 = y+c.oy
+            const isPredThis = userPredictions[`${d.data.ri}-${d.data.mi}`] === c.team
+            const onClick = predictionMode && !m.winner ? () => predictTeam(d.data.ri, d.data.mi, c.team) : null
+            drawBadge(cx2, cy2, mr, c.team, null, `c${ji}-${ci}`,
+              isPredThis?'#f0c040':'#666', isPredThis?2:1.2, onClick, hover)
+          })
+
+        } else {
+          g.append('circle').attr('cx',x).attr('cy',y).attr('r',d.depth<=1?7:5).attr('fill','#444')
+        }
+      })
+
+      // ── Team badges ──
+      root.leaves().forEach((d,i)=>{
+        const team  = d.data.name
+        const a     = d.x - Math.PI/2
+        const x     = Math.cos(a)*d.y
+        const y     = Math.sin(a)*d.y
+        const m     = d.data.match
+        const isWin = m?.winner===team
+        const isLos = m?.winner&&m.winner!==team&&team!=='TBD'
+        const isPred= m?.isPredicted&&isWin
+        const click = predictionMode&&!m?.winner&&team!=='TBD'
+
+        const isHome   = team === m?.home
+        const myScore  = m?.homeScore !== null ? (isHome ? m?.homeScore : m?.awayScore) : null
+        const scoreStr = myScore !== null && myScore !== undefined ? String(myScore) : null
+        const stroke   = isWin ? (isPred?'#c8a830':'#f0c040') : '#888'
+        const onClick  = click ? ()=>handleClick(d.data) : null
+        const hover2   = { over:e=>showTip(e,d.data), move:e=>showTip(e,d.data), out:hideTip }
+
+        const grp = g.append('g').attr('opacity', isLos?0.22:1)
+          .attr('class', click?'clickable':'')
+
+        const clipId=`clip-${i}`
+        defs.append('clipPath').attr('id',clipId)
+          .append('circle').attr('cx',x).attr('cy',y).attr('r',BADGE_R)
+
+        const url=flagUrl(team)
+        if(url&&team!=='TBD'){
+          grp.append('image').attr('href',url)
+            .attr('x',x-BADGE_R).attr('y',y-BADGE_R)
+            .attr('width',BADGE_R*2).attr('height',BADGE_R*2)
+            .attr('clip-path',`url(#${clipId})`)
+            .attr('preserveAspectRatio','xMidYMid slice')
+            .attr('pointer-events','none')
+        } else {
+          grp.append('circle').attr('cx',x).attr('cy',y).attr('r',BADGE_R)
+            .attr('fill','#2a2a3e').attr('pointer-events','none')
+          grp.append('text').attr('x',x).attr('y',y)
+            .attr('text-anchor','middle').attr('dominant-baseline','middle')
+            .attr('font-size','14px').attr('fill','#555')
+            .attr('pointer-events','none').text('?')
+        }
+
+        if (scoreStr) {
+          const barH = BADGE_R * 0.42
+          grp.append('rect')
+            .attr('x',x-BADGE_R).attr('y',y+BADGE_R-barH).attr('width',BADGE_R*2).attr('height',barH)
+            .attr('fill','rgba(0,0,0,0.62)').attr('clip-path',`url(#${clipId})`).attr('pointer-events','none')
+          grp.append('text')
+            .attr('x',x).attr('y',y+BADGE_R-barH/2)
+            .attr('text-anchor','middle').attr('dominant-baseline','middle')
+            .attr('fill','#fff').attr('font-size',`${Math.max(BADGE_R*0.38,8)}px`).attr('font-weight','bold')
+            .attr('clip-path',`url(#${clipId})`).attr('pointer-events','none')
+            .text(scoreStr)
+        }
+
+        grp.append('circle').attr('cx',x).attr('cy',y).attr('r',BADGE_R)
+          .attr('fill','transparent')
+          .attr('stroke',stroke).attr('stroke-width', isWin?3:1.5)
+          .on('mouseover',hover2.over).on('mousemove',hover2.move).on('mouseleave',hover2.out)
+          .on('click', onClick||null)
+      })
+
+      // ── Trophy ──
+      const tR   = 42
+      const tUrl = 'https://dscdn.daily-sun.com/english/uploads/news_photos/2025/12/18/world-cup_1920x1079-6943f968b91cd.jpg'
+      // Image is 1920x1079 with white space — scale up and crop to trophy
+      // Trophy: no circle, crop to just the trophy area
+      // Image 1920x1079, trophy roughly in center — show 30% width, 90% height of center
+      const tW = 80, tH = 96
+      const tScaleX = 1920 / tW, tScaleY = 1079 / tH
+      // Use SVG viewBox trick via foreignObject is complex; use image with large display + clip rect
+      defs.append('clipPath').attr('id','trophy-clip')
+        .append('rect').attr('x',-tW/2).attr('y',-tH/2).attr('width',tW).attr('height',tH)
+      // Scale image so trophy area fills tW x tH: show central ~30% width, 100% height
+      const dispW = tW * (1920 / (1920*0.28))   // zoom to show 28% of width
+      const dispH = dispW * (1079/1920)
+      g.append('image')
+        .attr('href', tUrl)
+        .attr('x', -dispW/2).attr('y', -dispH/2)
+        .attr('width', dispW).attr('height', dispH)
+        .attr('clip-path','url(#trophy-clip)')
+        .attr('preserveAspectRatio','xMidYMid slice')
+        .attr('pointer-events','none')
+    }
+
+    function redraw(){
+      if(!baseAligned)return
+      draw(applyPredictions(baseAligned,userPredictions))
+    }
+
+    document.getElementById('btn-predict').addEventListener('click',()=>{
+      predictionMode=!predictionMode
+      document.getElementById('btn-predict').classList.toggle('active',predictionMode)
+      svg.classed('predict-mode',predictionMode)
+      redraw()
+    })
+    document.getElementById('btn-reset').addEventListener('click',()=>{
+      userPredictions={}; redraw()
+    })
+
+    async function init(){
+      try{
+        const res=await fetch(DATA_URL)
+        const json=await res.json()
+        baseAligned=propagateWinners(alignBracket(parseRounds(json)))
+        redraw()
+      }catch(e){console.error(e)}
+    }
+    init()
+  </script>
+</body>
+</html>

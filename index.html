@@ -115,7 +115,9 @@
     // ── State ─────────────────────────────────────────────────────────────────
     let predictionMode  = false
     let userPredictions = {}   // key: "roundIdx-matchIdx" → team name
+    let bronzePrediction = null
     let baseAligned     = null // aligned rounds from live data (never mutated)
+    let bronzeMatch     = null // raw bronze match from JSON
 
     // ── Parse ─────────────────────────────────────────────────────────────────
     function parseRounds(data) {
@@ -192,6 +194,26 @@
         assignments.forEach(pair => newOrder.push(...pair))
         outer.matches.forEach((m,i) => { if (!used.has(i)) newOrder.push(m) })
         outer.matches = newOrder
+      }
+      return rounds
+    }
+
+    // ── Propagate real winners into next round ────────────────────────────────
+    // The openfootball JSON uses W-codes (W83, W84…) for pending R16 slots.
+    // After alignment, R32 match i feeds inner match floor(i/2), so we can fill
+    // in the team names from real results even before the JSON updates the codes.
+    function propagateWinners(rounds) {
+      for (let outerIdx = 0; outerIdx < rounds.length - 1; outerIdx++) {
+        const outer = rounds[outerIdx], inner = rounds[outerIdx + 1]
+        outer.matches.forEach((m, mi) => {
+          if (!m.winner || m.isPredicted) return
+          const innerMatchIdx = Math.floor(mi / 2)
+          const isHome = (mi % 2 === 0)
+          const next = inner.matches[innerMatchIdx]
+          if (next && !next[isHome ? 'home' : 'away']) {
+            next[isHome ? 'home' : 'away'] = m.winner
+          }
+        })
       }
       return rounds
     }
@@ -358,7 +380,7 @@
                 .attr("href", url)
                 .attr("width", flagW).attr("height", flagH)
                 .attr("x", -flagW/2).attr("y", imgY)
-                .attr("preserveAspectRatio", "xMidYMid meet")
+                .attr("preserveAspectRatio", "xMidYMid slice")
                 .attr("clip-path", "inset(0 round 2px)")
               yOff = flagH/2 + 2
             }
@@ -428,30 +450,71 @@
       predictionMode = !predictionMode
       document.getElementById("btn-predict").classList.toggle("active", predictionMode)
       svg.classed("predict-mode", predictionMode)
+      renderBronze()
       redraw()
     })
 
     document.getElementById("btn-reset").addEventListener("click", () => {
       userPredictions = {}
+      bronzePrediction = null
+      renderBronze()
       redraw()
     })
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
-    function renderBronze(data) {
-      const m = data.matches.find(m => m.round === 'Match for third place')
+    function renderBronze() {
       const el = document.getElementById('bronze')
-      if (!m) { el.style.display = 'none'; return }
+      if (!bronzeMatch) { el.style.display = 'none'; return }
 
-      const ft = (m.score?.ft) || [null, null]
-      const scoreStr = ft[0] !== null
-        ? `${m.team1} ${ft[0]}–${ft[1]} ${m.team2}`
-        : `${m.team1} vs ${m.team2}`
+      const m  = bronzeMatch
+      const ft = m.score?.ft || [null, null]
+      const isPlayed = ft[0] !== null
+      const clean = t => (t && /^W\d+$/.test(t)) ? null : t
+
+      // Try to derive SF losers if JSON still has W-codes
+      let t1 = clean(m.team1), t2 = clean(m.team2)
+      if (baseAligned) {
+        const sf = baseAligned[3]?.matches  // Semi-finals
+        if (sf) {
+          const loser = (sfm) => sfm.winner
+            ? (sfm.winner === sfm.home ? sfm.away : sfm.home)
+            : null
+          t1 = t1 || loser(sf[0])
+          t2 = t2 || loser(sf[1])
+        }
+      }
+      t1 = t1 || 'TBD'; t2 = t2 || 'TBD'
+
+      if (isPlayed) {
+        el.innerHTML = `
+          <div class="bronze-title">🥉 Third Place Match</div>
+          <div class="bronze-teams">${t1} ${ft[0]}–${ft[1]} ${t2}</div>
+          <div class="bronze-score">FT</div>`
+        return
+      }
+
+      const p = bronzePrediction
+      const btn = (team) => {
+        const active = p === team
+        const style  = active
+          ? 'background:#fab38733;border-color:#fab387;color:#fab387;'
+          : 'background:#313244;border-color:#45475a;color:#cdd6f4;'
+        const disabled = team === 'TBD' ? 'disabled' : ''
+        return `<button onclick="pickBronze('${team}')" style="${style}padding:4px 14px;border-radius:5px;border:1px solid;cursor:pointer;font-size:13px;" ${disabled}>${flagUrl(team) ? `<img src="${flagUrl(team)}" height="12" style="vertical-align:middle;margin-right:4px;">` : ''}${team}</button>`
+      }
 
       el.innerHTML = `
-        <div class="bronze-title">🥉 Third Place Match</div>
-        <div class="bronze-teams">${scoreStr}</div>
-        ${m.score?.ft ? `<div class="bronze-score">FT</div>` : `<div class="bronze-score">Upcoming</div>`}
-      `
+        <div class="bronze-title">🥉 Third Place Match ${predictionMode ? '· click to predict' : ''}</div>
+        <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:6px;">
+          ${btn(t1)} <span style="color:#585b70">vs</span> ${btn(t2)}
+        </div>
+        ${p ? `<div class="bronze-score">🔮 predicted: ${p}</div>` : ''}`
+    }
+
+    window.pickBronze = function(team) {
+      if (!predictionMode) return
+      bronzePrediction = bronzePrediction === team ? null : team
+      renderBronze()
     }
 
     async function init() {
@@ -459,8 +522,9 @@
         const res  = await fetch(DATA_URL)
         const json = await res.json()
         const raw  = parseRounds(json)
-        baseAligned = alignBracket(raw)
-        renderBronze(json)
+        baseAligned = propagateWinners(alignBracket(raw))
+        bronzeMatch = json.matches.find(m => m.round === 'Match for third place') || null
+        renderBronze()
         redraw()
       } catch(e) {
         console.error("Failed to load data", e)
